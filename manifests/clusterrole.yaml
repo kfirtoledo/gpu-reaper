@@ -1,0 +1,29 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: gpu-reaper
+  labels:
+    app.kubernetes.io/name: gpu-reaper
+rules:
+  # Read namespaces for annotation-based exclusion
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list"]
+  # Read pods cluster-wide, exec into them, delete standalone ones
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+  # Scale deployments, replicasets, statefulsets
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets", "statefulsets"]
+    verbs: ["get", "list", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale", "replicasets/scale", "statefulsets/scale"]
+    verbs: ["patch", "update"]
+  # State ConfigMap
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "create", "update", "patch"]

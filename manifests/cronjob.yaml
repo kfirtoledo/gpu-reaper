@@ -27,7 +27,7 @@ spec:
               command: ["python", "/app/reaper.py"]
               env:
                 - name: IDLE_THRESHOLD_MINUTES
-                  value: "30"
+                  value: "240"
                 - name: DRY_RUN
                   value: "true"
                 - name: EXCLUDE_NAMESPACES

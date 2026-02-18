@@ -48,14 +48,14 @@ kubectl -n gpu-reaper set env cronjob/gpu-reaper DRY_RUN=false
 
 All settings are environment variables on the CronJob container:
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `IDLE_THRESHOLD_MINUTES` | `30` | Minutes of inactivity before scaling down |
-| `DRY_RUN` | `true` | Set to `false` to actually scale down workloads |
-| `NAMESPACE` | _(all)_ | Scope to a single namespace |
-| `EXCLUDE_NAMESPACES` | `kube-system,openshift-*,gpu-reaper` | Comma-separated, supports glob patterns |
-| `VLLM_METRICS_PORT` | `8000` | Port where vLLM serves `/metrics` |
-| `GPU_UTIL_THRESHOLD` | `5` | GPU utilization % below which nvidia-smi considers a GPU idle |
+| Variable                 | Default                              | Description                                                   |
+|--------------------------|--------------------------------------|---------------------------------------------------------------|
+| `IDLE_THRESHOLD_MINUTES` | `240`                                | Minutes of inactivity before scaling down                     |
+| `DRY_RUN`                | `true`                               | Set to `false` to actually scale down workloads               |
+| `NAMESPACE`              | _(all)_                              | Scope to a single namespace                                   |
+| `EXCLUDE_NAMESPACES`     | `kube-system,openshift-*,gpu-reaper` | Comma-separated, supports glob patterns                       |
+| `VLLM_METRICS_PORT`      | `8000`                               | Port where vLLM serves `/metrics`                             |
+| `GPU_UTIL_THRESHOLD`     | `5`                                  | GPU utilization % below which nvidia-smi considers a GPU idle |
 
 ## Opt out a workload
 

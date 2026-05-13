@@ -36,11 +36,14 @@ class ReaperConfig:
     vllm_metrics_port: int
     gpu_util_threshold: int
     reaper_namespace: str
+    dcgm_namespace: str
+    dcgm_label_selector: str
+    dcgm_port: int
 
 
 def load_config() -> ReaperConfig:
     return ReaperConfig(
-        idle_threshold=timedelta(minutes=int(os.getenv("IDLE_THRESHOLD_MINUTES", "30"))),
+        idle_threshold=timedelta(minutes=int(os.getenv("IDLE_THRESHOLD_MINUTES", "120"))),
         dry_run=os.getenv("DRY_RUN", "true").lower() != "false",
         namespace=os.getenv("NAMESPACE") or None,
         exclude_namespaces=[
@@ -51,6 +54,9 @@ def load_config() -> ReaperConfig:
         vllm_metrics_port=int(os.getenv("VLLM_METRICS_PORT", "8000")),
         gpu_util_threshold=int(os.getenv("GPU_UTIL_THRESHOLD", "5")),
         reaper_namespace=os.getenv("REAPER_NAMESPACE", "gpu-reaper"),
+        dcgm_namespace=os.getenv("DCGM_EXPORTER_NAMESPACE", "nvidia-gpu-operator"),
+        dcgm_label_selector=os.getenv("DCGM_EXPORTER_LABEL", "app=nvidia-dcgm-exporter"),
+        dcgm_port=int(os.getenv("DCGM_EXPORTER_PORT", "9400")),
     )
 
 
@@ -219,6 +225,81 @@ def check_vllm_metrics(pod_ip: str, port: int) -> Optional[bool]:
     return r == 0.0 and w == 0.0
 
 
+_DCGM_EXPORTER_CACHE: dict[str, Optional[str]] = {}
+
+
+def find_dcgm_exporter_ip(
+    core_v1: client.CoreV1Api,
+    node_name: str,
+    dcgm_ns: str,
+    dcgm_label: str,
+) -> Optional[str]:
+    """Locate the DCGM exporter pod IP on a given node. Cached per-run."""
+    if node_name in _DCGM_EXPORTER_CACHE:
+        return _DCGM_EXPORTER_CACHE[node_name]
+    try:
+        exporters = core_v1.list_namespaced_pod(
+            dcgm_ns,
+            label_selector=dcgm_label,
+            field_selector=f"spec.nodeName={node_name},status.phase=Running",
+        ).items
+    except client.ApiException:
+        _DCGM_EXPORTER_CACHE[node_name] = None
+        return None
+    ip = exporters[0].status.pod_ip if exporters else None
+    _DCGM_EXPORTER_CACHE[node_name] = ip
+    return ip
+
+
+def check_dcgm_metrics(
+    core_v1: client.CoreV1Api,
+    pod: client.V1Pod,
+    cfg: "ReaperConfig",
+) -> Optional[bool]:
+    """Query the node-local DCGM exporter for this pod's GPU utilization.
+
+    Returns True if every GPU assigned to the pod is below threshold,
+    False if any GPU is above, None if metrics are unavailable.
+    """
+    node_name = pod.spec.node_name
+    if not node_name:
+        return None
+
+    exporter_ip = find_dcgm_exporter_ip(core_v1, node_name, cfg.dcgm_namespace, cfg.dcgm_label_selector)
+    if not exporter_ip:
+        return None
+
+    try:
+        resp = http_requests.get(
+            f"http://{exporter_ip}:{cfg.dcgm_port}/metrics", timeout=5,
+        )
+        resp.raise_for_status()
+        text = resp.text
+    except Exception:
+        return None
+
+    pod_name = pod.metadata.name
+    pod_ns = pod.metadata.namespace
+    utils: list[float] = []
+    for line in text.split("\n"):
+        if not line.startswith("DCGM_FI_DEV_GPU_UTIL{"):
+            continue
+        if f'pod="{pod_name}"' not in line:
+            continue
+        if f'namespace="{pod_ns}"' not in line:
+            continue
+        m = re.search(r"\}\s+(\S+)\s*$", line)
+        if not m:
+            continue
+        try:
+            utils.append(float(m.group(1)))
+        except ValueError:
+            continue
+    if not utils:
+        return None
+    return max(utils) < cfg.gpu_util_threshold
+
+
 def check_nvidia_smi(
     core_v1: client.CoreV1Api,
     pod: client.V1Pod,
@@ -254,18 +335,33 @@ def is_pod_idle(
     pod: client.V1Pod,
     cfg: ReaperConfig,
 ) -> Optional[bool]:
-    """Returns True if idle, False if active, None if unable to determine."""
+    """Returns True if idle, False if active, None if unable to determine.
+
+    Order: DCGM exporter (cluster-wide GPU util, no exec) -> vLLM metrics ->
+    in-pod nvidia-smi exec. DCGM is primary because it works for every GPU
+    workload (vLLM, sglang, training, debug pods) without requiring a working
+    /metrics endpoint or exec permission.
+    """
+    dcgm_result = check_dcgm_metrics(core_v1, pod, cfg)
+    if dcgm_result is not None:
+        return dcgm_result
+
     pod_ip = pod.status.pod_ip
     if pod_ip:
         vllm_result = check_vllm_metrics(pod_ip, cfg.vllm_metrics_port)
         if vllm_result is not None:
+            log.info(
+                "[FALLBACK] %s/%s -- DCGM unavailable, vLLM /metrics: %s",
+                pod.metadata.namespace,
+                pod.metadata.name,
+                "idle" if vllm_result else "active",
+            )
             return vllm_result
 
     smi_result = check_nvidia_smi(core_v1, pod, cfg.gpu_util_threshold)
     if smi_result is not None:
-        method = "nvidia-smi fallback"
         log.info(
-            "[FALLBACK] %s/%s -- /metrics unreachable, nvidia-smi: %s",
+            "[FALLBACK] %s/%s -- DCGM/vLLM unavailable, nvidia-smi: %s",
             pod.metadata.namespace,
             pod.metadata.name,
             "idle" if smi_result else "active",

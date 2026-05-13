@@ -27,15 +27,21 @@ spec:
               command: ["python", "/app/reaper.py"]
               env:
                 - name: IDLE_THRESHOLD_MINUTES
-                  value: "240"
+                  value: "120"
                 - name: DRY_RUN
-                  value: "true"
+                  value: "false"
                 - name: EXCLUDE_NAMESPACES
                   value: "kube-system,openshift-*,gpu-reaper"
                 - name: VLLM_METRICS_PORT
                   value: "8000"
                 - name: GPU_UTIL_THRESHOLD
                   value: "5"
+                - name: DCGM_EXPORTER_NAMESPACE
+                  value: "nvidia-gpu-operator"
+                - name: DCGM_EXPORTER_LABEL
+                  value: "app=nvidia-dcgm-exporter"
+                - name: DCGM_EXPORTER_PORT
+                  value: "9400"
                 - name: REAPER_NAMESPACE
                   valueFrom:
                     fieldRef:

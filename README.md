@@ -61,22 +61,25 @@ All settings are environment variables on the CronJob container:
 | `DCGM_EXPORTER_LABEL`      | `app=nvidia-dcgm-exporter`           | Label selector for DCGM exporter pods                                      |
 | `DCGM_EXPORTER_PORT`       | `9400`                               | Port serving DCGM `/metrics`                                               |
 
-## Opt out a workload
+## Exempt a workload
 
-Add the `gpu-reaper.io/exclude=true` annotation at any level — namespace, deployment, or pod:
+Exemptions are admin-only: list them in the `gpu-reaper-exempt` ConfigMap in the reaper namespace.
+Annotations on user workloads are ignored, so owners cannot exempt themselves.
 
-```bash
-# Exclude an entire namespace
-kubectl annotate namespace/team-prod gpu-reaper.io/exclude=true
-
-# Exclude a specific deployment
-kubectl annotate deployment/my-vllm gpu-reaper.io/exclude=true
-
-# Exclude a specific pod
-kubectl annotate pod/my-pod gpu-reaper.io/exclude=true
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gpu-reaper-exempt
+  namespace: gpu-reaper
+data:
+  # <namespace>/<deployment-or-statefulset-name>, or <namespace>/* for a whole namespace (globs allowed)
+  exempt: |
+    team-prod/*
+    team-dev/my-vllm   # reason
 ```
 
-Namespace-level exclusion skips all GPU pods in that namespace, regardless of per-pod or per-deployment annotations.
+The list is re-read on every run; no restart needed.
 
 ## Restore a scaled-down deployment
 
@@ -107,11 +110,11 @@ CronJob (every 5 min)
 ## RBAC
 
 The ClusterRole grants:
-- `namespaces`: get, list (for namespace-level exclusion annotations)
+- `namespaces`: get, list
 - `pods`: get, list, patch, delete (patch for annotations, delete for standalone pods)
 - `pods/exec`: create (for nvidia-smi fallback)
 - `deployments`, `replicasets`, `statefulsets`: get, list, patch (for scale-down)
-- `configmaps`: get, create, update, patch (for idle state tracking)
+- `configmaps`: get, create, update, patch (for idle state tracking and the exempt list)
 
 ## Limitations
 

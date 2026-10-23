@@ -17,10 +17,10 @@ from kubernetes.stream import stream
 
 log = logging.getLogger("gpu-reaper")
 
-ANNOTATION_EXCLUDE = "gpu-reaper.io/exclude"
 ANNOTATION_SCALED_DOWN_AT = "gpu-reaper.io/scaled-down-at"
 ANNOTATION_REASON = "gpu-reaper.io/reason"
 STATE_CONFIGMAP_NAME = "gpu-reaper-state"
+EXEMPT_CONFIGMAP_NAME = "gpu-reaper-exempt"
 GPU_RESOURCE = "nvidia.com/gpu"
 
 
@@ -101,18 +101,24 @@ def gpu_container_name(pod: client.V1Pod) -> str:
     return pod.spec.containers[0].name
 
 
-def get_excluded_namespaces_by_annotation(core_v1: client.CoreV1Api) -> set[str]:
-    """Return set of namespace names that have the gpu-reaper.io/exclude annotation."""
-    excluded = set()
+def load_exempt(core_v1: client.CoreV1Api, namespace: str) -> list[str]:
+    """Load exempt workload patterns ("namespace/name", globs allowed) from an admin-managed ConfigMap.
+
+    Exemption is deliberately not controlled by annotations on user workloads, so workload
+    owners cannot exempt themselves.
+    """
     try:
-        namespaces = core_v1.list_namespace().items
-        for ns_obj in namespaces:
-            annotations = ns_obj.metadata.annotations or {}
-            if annotations.get(ANNOTATION_EXCLUDE, "").lower() == "true":
-                excluded.add(ns_obj.metadata.name)
+        cm = core_v1.read_namespaced_config_map(EXEMPT_CONFIGMAP_NAME, namespace)
     except client.ApiException as e:
-        log.warning("Failed to list namespaces for annotation check: %s", e.reason)
-    return excluded
+        if e.status == 404:
+            return []
+        raise
+    text = (cm.data or {}).get("exempt", "")
+    return [l.split("#", 1)[0].strip() for l in text.splitlines() if l.split("#", 1)[0].strip()]
+
+
+def owner_exempt(ns: str, owner_name: str, patterns: list[str]) -> bool:
+    return any(fnmatch(f"{ns}/{owner_name}", p) for p in patterns)
 
 
 def get_gpu_pods(core_v1: client.CoreV1Api, cfg: ReaperConfig) -> list[client.V1Pod]:
@@ -121,19 +127,10 @@ def get_gpu_pods(core_v1: client.CoreV1Api, cfg: ReaperConfig) -> list[client.V1
     else:
         pods = core_v1.list_pod_for_all_namespaces(field_selector="status.phase=Running").items
 
-    excluded_ns_annotations = get_excluded_namespaces_by_annotation(core_v1)
-
     result = []
     for pod in pods:
         ns = pod.metadata.namespace
         if namespace_excluded(ns, cfg.exclude_namespaces):
-            continue
-        if ns in excluded_ns_annotations:
-            log.info("[SKIP] %s/%s -- namespace has %s annotation", ns, pod.metadata.name, ANNOTATION_EXCLUDE)
-            continue
-        annotations = pod.metadata.annotations or {}
-        if annotations.get(ANNOTATION_EXCLUDE, "").lower() == "true":
-            log.info("[SKIP] %s/%s -- has %s annotation", ns, pod.metadata.name, ANNOTATION_EXCLUDE)
             continue
         if pod_has_gpu(pod):
             result.append(pod)
@@ -165,15 +162,6 @@ def resolve_owner(
             rs = apps_v1.read_namespaced_replica_set(owner.name, ns)
             rs_owners = rs.metadata.owner_references or []
             if rs_owners and rs_owners[0].kind == "Deployment":
-                # Check if the deployment also has the exclude annotation
-                dep = apps_v1.read_namespaced_deployment(rs_owners[0].name, ns)
-                dep_annotations = dep.metadata.annotations or {}
-                if dep_annotations.get(ANNOTATION_EXCLUDE, "").lower() == "true":
-                    log.info(
-                        "[SKIP] %s/%s -- parent Deployment %s has %s annotation",
-                        ns, pod.metadata.name, rs_owners[0].name, ANNOTATION_EXCLUDE,
-                    )
-                    return "Skip", rs_owners[0].name, ns
                 return "Deployment", rs_owners[0].name, ns
         except client.ApiException:
             pass
@@ -519,6 +507,7 @@ def main():
     pods = get_gpu_pods(core_v1, cfg)
     log.info("Found %d GPU pods", len(pods))
 
+    exempt = load_exempt(core_v1, cfg.reaper_namespace)
     state, rv = load_state(core_v1, cfg.reaper_namespace)
     now = datetime.now(timezone.utc)
     live_uids: set[str] = set()
@@ -538,6 +527,12 @@ def main():
         owner_kind, owner_name, owner_ns = resolve_owner(pod, apps_v1)
         if owner_kind == "Skip":
             log.info("[SKIP] %s/%s -- owned by %s (not a scalable workload)", ns, name, owner_name)
+            continue
+
+        if owner_exempt(owner_ns, owner_name, exempt):
+            log.info("[EXEMPT] %s/%s", ns, name)
+            if uid in state:
+                del state[uid]
             continue
 
         owner_key = f"{owner_kind}/{owner_ns}/{owner_name}"

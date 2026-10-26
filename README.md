@@ -8,7 +8,7 @@ Every 5 minutes, the CronJob:
 
 1. Lists all Running pods with `nvidia.com/gpu` resource requests
 2. For each pod, checks idle status:
-   - **Primary**: Queries the node-local DCGM exporter for `DCGM_FI_DEV_GPU_UTIL` filtered by pod — works for any GPU workload (vLLM, sglang, training, debug pods) without exec
+   - **Primary**: Queries the node-local DCGM exporter for `DCGM_FI_DEV_GPU_UTIL` (or `DCGM_FI_PROF_GR_ENGINE_ACTIVE`, its DCGM 3.x replacement) filtered by pod — works for any GPU workload (vLLM, sglang, training, debug pods) without exec
    - **Fallback 1**: Scrapes vLLM `/metrics` (`vllm:num_requests_running`, `vllm:num_requests_waiting`)
    - **Fallback 2**: Execs `nvidia-smi` in the GPU container
 3. Tracks idle duration in a ConfigMap

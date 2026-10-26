@@ -270,7 +270,10 @@ def check_dcgm_metrics(
     pod_ns = pod.metadata.namespace
     utils: list[float] = []
     for line in text.split("\n"):
-        if not line.startswith("DCGM_FI_DEV_GPU_UTIL{"):
+        if not (
+            line.startswith("DCGM_FI_DEV_GPU_UTIL{")
+            or line.startswith("DCGM_FI_PROF_GR_ENGINE_ACTIVE{")
+        ):
             continue
         if f'pod="{pod_name}"' not in line:
             continue
@@ -280,9 +283,14 @@ def check_dcgm_metrics(
         if not m:
             continue
         try:
-            utils.append(float(m.group(1)))
+            value = float(m.group(1))
         except ValueError:
             continue
+        # DCGM 3.x replaced DCGM_FI_DEV_GPU_UTIL (0-100 percent) with
+        # DCGM_FI_PROF_GR_ENGINE_ACTIVE (0-1 fraction of time a kernel ran).
+        if line.startswith("DCGM_FI_PROF_GR_ENGINE_ACTIVE"):
+            value *= 100.0
+        utils.append(value)
     if not utils:
         return None
     return max(utils) < cfg.gpu_util_threshold
